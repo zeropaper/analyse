@@ -1,0 +1,497 @@
+<?php
+
+function analyse_ctools_plugin_directory($module, $plugin) {
+  return 'plugins/'. $module .'/'. $plugin;
+}
+
+function analyse_menu() {
+  $items = array();
+  $items['devel/analyse'] = array(
+    'file' => 'analyse.devel.inc',
+    'title' => 'Analyse',
+    'page callback' => 'analyse_devel_overview',
+    'access arguments' => array('access devel information'),
+  );
+  $items['devel/analyse/overview'] = array(
+    'file' => 'analyse.devel.inc',
+    'title' => 'Overview',
+    'weight' => -1,
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+  $items['devel/analyse/widgets'] = array(
+    'file' => 'analyse.devel.inc',
+    'title' => 'Widgets',
+    'page callback' => 'analyse_devel_widgets',
+    'access arguments' => array('access devel information'),
+    'type' => MENU_LOCAL_TASK,
+  );
+  return $items;
+}
+
+function analyse_get_widget($name) {
+  $widgets = analyse_analysis();
+  return isset($widgets[$name]) ? $widgets[$name] : FALSE;
+}
+
+function analyse_get_widgets() {
+  return analyse_widgets();
+}
+
+function analyse_get_values($context, $widget, $single = TRUE) {
+  $data = array();
+  
+  $vote_base = array(
+    'content_type' => $context->type,
+    'content_id' => $context->argument,
+  );
+  
+  if ($single) {
+    $vote_base += votingapi_current_user_identifier();
+  }
+  
+  foreach (votingapi_select_votes($vote_base) as $vote) {
+    if ($single) {
+      $data[$vote['tag']] = $vote;
+    }
+    else {
+      $data[$context->argument .':'. $vote['uid'] .':'. $vote['vote_source']][$vote['tag']] = $vote;
+    }
+  }
+  
+  return $data;
+}
+
+function analyse_radar_render($options) {
+  static $sdi = 0;
+  $options = array_merge(array(
+    'single'  => TRUE,
+    'curves'  => TRUE,
+    'image'   => TRUE,
+    'colors'  => explode(',', variable_get('analyse_default_fill_colors', 'FF0000,FF9900,FF9999,9999FF,99FFFF,FF99FF,0099FF,0099FF')),
+    'width'   => variable_get('analyse_default_radar_width', 300),
+    'height'  => variable_get('analyse_default_radar_height', 300),
+  ), $options);
+  
+  $values = FALSE;
+  if (isset($options['values'])) {
+    $values = $options['values'];
+  }
+  elseif (isset($options['context']) && isset($options['widget'])) {
+    $values = analyse_get_values($options['context'], $options['widget'], $options['single']);
+  }
+  
+  if (!$values || empty($values)) {
+    return NULL;
+  }
+  
+  $query = array();
+  $query[] = 'cht='. ($option['curves'] ? 'rs' : 'r');
+  $query[] = 'chs='. $options['width'] .'x'. $options['height'];
+  
+  // values
+  $values_string = array();
+  foreach (($options['single'] ? array($values) : $values) as $v) {
+    $current = array();
+    foreach ($v as $vv) {
+      $current[] = $vv['value'];
+    }
+    
+    $first = array_shift($current);
+    array_unshift($current, $first);
+    $current[] = $first;
+    
+    $values_string[] = implode(',', $current);
+  }
+  $query[] = 'chd=t:'. implode('|', $values_string);
+  
+  // labels
+  $labels = array();
+  if (isset($options['widget'])) {
+    foreach ($options['widget']->criteria as $criterion) {
+      $labels[] = $criterion->label;
+    }
+  }
+  $query[] = 'chxl=0:|'. implode('|', $labels) .'|1:||25|50|75|100';
+  
+  $query[] = 'chxt=x,y';
+  
+  if (count($options['colors'])) {
+    $transparency = variable_get('analyse_default_fill_transparency', '20');
+    $fills = array();
+    foreach (array_values($options['colors']) as $i => $color) {
+      $fills[] = 'B,'. $color . $transparency .','. $i .',0,0';
+    }
+    $query[] = 'chco='. implode(',', $options['colors']);
+    $query[] = 'chm='. implode('|', $fills);
+  }
+  // transparent background
+  $query[] = 'chf=bg,s,00000000';
+  
+  $return = url('http://chart.apis.google.com/chart', array(
+    'query' => implode('&', $query),
+  ));
+  
+  $sdi++;
+  $sdi = $sdi == 10 ? 0 : $sdi;
+  
+  if ($options['image']) {
+    // do not check the size
+    $return = theme('image', $return, '', '', NULL, FALSE);
+  }
+  return $return;
+}
+
+function analyse_forms($form_id, $args) {
+  $forms = array();
+  if (strpos($form_id, '_analyse_form')) {
+    if ($widget = analyse_get_widget(substr($form_id, 0, 0 - strlen('_analyse_form')))) {
+      $forms[$form_id] = array(
+        'callback' => 'analyse_form',
+        'callback arguments' =>  array_merge(array($widget), $args),
+      );
+    }
+  }
+  return $forms;
+}
+
+
+
+function analyse_form(&$form_state, $widget, $context) {
+  if (empty($context) || empty($context->data)) {
+    return NULL;
+  }
+  
+  $values = analyse_get_values($context, $widget);
+  
+  $form = array(
+    '#analyse_widget'   => $widget,
+    '#analyse_context'  => $context,
+    '#validate'         => array('analyse_form_validate'),
+    '#submit'           => array('analyse_form_submit'),
+    'chart'             => array(
+      '#value' => analyse_radar_render(array(
+        'widget'  => $widget,
+        'context' => $context,
+//        'values'  => $values,
+        'single'  => FALSE
+      ))
+    ),
+    'criteria'          => array('#tree' => TRUE),
+    'submit'            => array(
+      '#type' => 'submit',
+      '#value' => t('Submit'),
+    ),
+  );
+  
+  if ($widget->show_description) {
+    $form['description'] = array(
+      '#value' => $widget->description
+    );
+  }
+  
+  foreach ($widget->criteria as $criterion) {
+    
+    $value = isset($values[$criterion->name]) ? $values[$criterion->name] : NULL;
+    
+    $choices = array();
+    if (!$criterion->required) {
+      $choices['none'] = t('None');
+    }
+    for ($i = $criterion->precision; $i >= 0; $i--) {
+      $choice = (100/$criterion->precision) * $i;
+      $choices[$choice] = $choice .'%';
+    }
+    
+    $form['criteria'][$criterion->name] = array(
+      '#analyse_criterion'  => $criterion,
+      '#title'              => $criterion->label,
+      '#type'               => 'select',
+      '#default_value'      => $value['value'],
+      '#required'           => intval($criterion->required),
+      '#options'            => $choices,
+      '#description'        => $criterion->description,
+      '#weight'             => isset($criterion->weight) ? $criterion->weight : 0,
+    );
+    
+  }
+  
+  return $form;
+}
+
+function analyse_form_validate(&$form, &$form_state) {
+  $values = &$form_state['values'];
+  $widget = $form['#analyse_widget'];
+  $context = $form['#analyse_context'];
+  
+}
+
+function analyse_form_submit(&$form, &$form_state) {
+  $values = &$form_state['values'];
+  $widget = $form['#analyse_widget'];
+  $context = $form['#analyse_context'];
+  
+  $vote_base = array(
+    'content_type' => $context->type,
+    'content_id' => $context->argument,
+  ) + votingapi_current_user_identifier();
+  
+  $votes = array();
+  // $tag is the criterion (machine) name
+  foreach ($values['criteria'] as $tag => $value) {
+    if ($value !== '' && $value !== NULL && $value != 'none') {
+      $votes[] = array_merge($vote_base, array(
+        'tag' => $tag,
+        'value' => $value,
+      ));
+    }
+  }
+  
+  // passing the $vote_base will remove the previous votes
+  votingapi_set_votes($votes, $vote_base);
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function analyse_analysis() {
+  $widgets = array();
+  
+  $widget = new stdClass();
+  $widget->name = 'demo1';
+  $widget->title = t('Demo 1');
+  $widget->description = t('A description for the analysis widget.');
+  $widget->contexts = array(
+    'node',
+    'user',
+    'term'
+  );
+  
+  $widget->criteria = array();
+  
+  $criterion = new stdClass();
+  $criterion->name = 'criterion1';
+  $criterion->label = t('Criterion 1');
+  $criterion->precision = 1; // 100 / 1 => 100
+  $criterion->ui = NULL;
+  $criterion->required = TRUE; // a value will be required (the value might be 0
+  $criterion->description = t('A description for the criterion.');
+  $criterion->weight = 0;
+  $widget->criteria[$criterion->name] = $criterion;
+  
+  $criterion = new stdClass();
+  $criterion->name = 'criterion2';
+  $criterion->label = t('Criterion 2');
+  $criterion->precision = 10; // 100 / 10 => 0.1
+  $criterion->ui = NULL;
+  $criterion->required = TRUE;
+  $criterion->description = t('A description for the criterion.');
+  $criterion->weight = 1;
+  $widget->criteria[$criterion->name] = $criterion;
+  
+  $criterion = new stdClass();
+  $criterion->name = 'criterion3';
+  $criterion->label = t('Criterion 3');
+  $criterion->precision = 4; // 100 / 4 => 0.25
+  $criterion->ui = NULL;
+  $criterion->required = FALSE;
+  $criterion->description = t('A description for the criterion.');
+  $criterion->weight = 2;
+  $widget->criteria[$criterion->name] = $criterion;
+  
+  $criterion = new stdClass();
+  $criterion->name = 'criterion4';
+  $criterion->label = t('Criterion 4');
+  $criterion->precision = 8;
+  $criterion->ui = NULL;
+  $criterion->required = FALSE;
+  $criterion->description = t('A description for the criterion.');
+  $criterion->weight = 3;
+  $widget->criteria[$criterion->name] = $criterion;
+  
+  $criterion = new stdClass();
+  $criterion->name = 'criterion5';
+  $criterion->label = t('Criterion 5');
+  $criterion->precision = 100;
+  $criterion->ui = NULL;
+  $criterion->required = FALSE;
+  $criterion->description = t('A description for the criterion.');
+  $criterion->weight = -1;
+  $widget->criteria[$criterion->name] = $criterion;
+  
+  $widgets[$widget->name] = $widget;
+  return $widgets;
+}
+
+
+
+
+
+
+
+//function analyse_theme() {
+//  return array(
+//    'analyse' => array(
+//      'arguments' => array('element' => NULL),
+//    ),
+//  );
+//}
+//
+//function theme_analyse($element) {
+//  return $element['#children'];
+//}
+//
+//function analyse_elements() {
+//  $elements = array();
+//  $elements['analyse'] = array(
+//    '#input' => TRUE,
+//    '#process' => array('analyse_process'),
+//    '#validate' => array('analyse_validate'),
+//    '#element_validate' => array('analyse_element_validate'),
+//  );
+//  return $elements;
+//}
+//
+//function analyse_process($element, $edit, $form_state, $complete_form) {
+//  ctools_include('criterion', 'analyse');
+//  
+//  $value = is_array($element['#value']) ? $element['#value'] : array();
+//  
+//  if (empty($value) && is_array($element['#values_source'])) {
+//    if (empty($element['#criteria']) && isset($element['#values_source']['criteria_preset']) && function_exists($element['#values_source']['criteria_preset'])) {
+//      $element['#criteria'] = $element['#values_source']['criteria_preset']($element['#values_source']['object_id'], $element['#values_source']['object_type']);
+//    }
+//  }
+//  
+//  if (empty($element['#criteria'])) {
+//    drupal_set_message(t('Impossible to find the criteria.'));
+//    return array();
+//  }
+//  
+//  if (!isset($element['#default_value']) || !is_array($element['#default_value'])) {
+//    $element['#default_value'] = array();
+//  }
+//  $element['#tree'] = TRUE;
+//  
+//  foreach ($element['#criteria'] as $tag => $criterion) {
+//    zdpm($tag .' '. $criterion['name'] .' => '. $value[$tag]);
+//    $element[$tag] = array(
+//      '#processed' => TRUE,
+//      '#type' => 'textfield',
+//      '#size' => 4,
+//
+//      '#criterion' => $criterion,
+//      '#title' => analyse_criterion_label_render($criterion, $tag),
+//      '#default_value' => $value[$tag],
+//
+//      '#required' => $element['#required'],
+//      '#attributes' => $element['#attributes'],
+//      '#ahah' => isset($element['#ahah']) ? $element['#ahah'] : NULL,
+//    );
+//    analyse_criterion_widget($element[$tag], $edit, $form_state, $complete_form);
+//  }
+//  
+////  zdpm($element);
+//  
+//  return $element;
+//}
+//
+//function analyse_validate(&$form, &$form_state) {
+//  
+//}
+//
+//function analyse_element_validate(&$element, &$form_state) {
+//  
+//}
+//
+//function analyse_submit(&$form, &$form_state) {
+//  
+//}
+//
+//function analyse_form_alter(&$form, &$form_state, $form_id) {
+//  if ($form_id == 'node_type_form') {
+//    ctools_include('ajax');
+//    ctools_add_js('ajax-reponder');
+//    $node_type = $form['#node_type'];
+//    $form['analyse'] = array(
+//      '#tree' => TRUE,
+////      '#type' => 'fieldset',
+//      '#collapsible' => TRUE,
+//      '#collapsed' => FALSE,
+//      '#title' => t('Analyse'),
+//      'criteria' => array(),
+//      'require_all' => array(
+//        '#type' => 'checkbox',
+//        '#return_value' => 1,
+//        '#title' => t('Require all to vote'),
+//        '#description' => t('If this is checked, the submissions will only validate if all criteria are given a vote.'),
+//      ),
+//    );
+//    $var_key = 'analyse_'. check_plain($node_type->type) .'_criteria';
+//    ctools_ajax_associate_url_to_element($form, $form['analyse']['require_all'], 'example/nojs/path/'. $c);
+//    $criteria = isset($form_state['post']['analyse']['criteria']) ? $form_state['post']['analyse']['criteria'] : variable_get($var_key, array());
+//    $criteria_base = array(
+//      'key' => array(
+//        '#type' => 'textfield',
+//        '#title' => t('Key'),
+//      ),
+//      'label' => array(
+//        '#type' => 'textfield',
+//        '#title' => t('Label'),
+//      ),
+//    );
+//    
+//    $c = 0;
+//    if (is_array($criteria)) {
+//      foreach ($criteria as $criterion) {
+//        if ($criterion['key']) {
+//          $c = count($form['analyse']['criteria']);
+//          $new = $criteria_base;
+//          
+//          $new['key']['#default_value'] = $ccriterion['key'];
+//          
+//          $new['label']['#default_value'] = $criterion['label'];
+//          
+//          $form['analyse']['criteria'][$c] = $new;
+//        }
+//      }
+//      
+//    }
+//    $form['analyse']['update'] = array(
+//      '#type' => 'button',
+//      '#value' => t('Update'),
+//    );
+//    
+//    $c = count($form['analyse']['criteria']);
+//    $form['analyse']['criteria'][$c] = $criteria_base;
+//    ctools_ajax_associate_url_to_element($form, $form['analyse']['criteria'][$c]['label'], 'example/nojs/path/'. $c);
+//    ctools_ajax_associate_url_to_element($form, $form['analyse']['criteria'][$c]['key'], 'example/nojs/path/'. $c);
+//    
+//    $form['#submit'][] = 'analyse_node_type_form_submit';
+//    zdpm($form['analyse']['criteria']);
+//  }
+//}
+//
+//function analyse_node_type_form_submit(&$form, &$form_state) {
+//  $criteria = array();
+//  foreach ($form_state['values']['analyse']['criteria'] as $c) {
+//    if ($c['key']) {
+//      $criteria[] = $c;
+//    }
+//  }
+//  variable_set('analyse_'. check_plain($form['#node_type']->type) .'_criteria', $criteria);
+//}

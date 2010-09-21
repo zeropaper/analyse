@@ -1,0 +1,33 @@
+<?php
+
+include_once('analysis.features.inc');
+
+
+function analysis_ctools_plugin_directory($module, $plugin) {
+  return 'plugins/'. $module .'/'. $plugin;
+}
+
+function analysis_get_values($node) {
+  
+  $nid = is_numeric($node) ? $node : $node->nid;
+  
+  $data = array();
+  
+  $view = views_get_view('analysis_subjects');
+  $view->set_arguments(array($nid));
+  $view->build();
+  $view->execute();
+  foreach ($view->result as $row) {
+    
+    foreach (votingapi_select_votes(array(
+      'content_type' => 'node',
+      'content_id' => $row->nid,
+    )) as $vote) {
+      $vote['color'] = $row->node_data_field_color_field_color_value;
+      $data[$row->nid .':'. $vote['uid'] .':'. $vote['vote_source']][$vote['tag']] = $vote;
+    }
+    
+  }
+  
+  return $data;
+}

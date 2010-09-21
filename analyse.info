@@ -1,0 +1,5 @@
+name = "Analyse"
+description = "Provides an API for multi-criteria voting."
+core = 6.x
+dependencies[] = ctools
+dependencies[] = votingapi
